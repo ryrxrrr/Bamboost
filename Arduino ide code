@@ -1,0 +1,155 @@
+#include <ArduinoBLE.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// 蓝牙服务和特征的UUID
+BLEService myService("0000ABCD-0000-1000-8000-00805F9B34FB");
+BLEIntCharacteristic outputCharacteristic("0000ABCE-0000-1000-8000-00805F9B34FB", BLERead | BLENotify); // 用于发送湿度数据
+BLEIntCharacteristic inputCharacteristic("0000ABCF-0000-1000-8000-00805F9B34FB", BLEWrite | BLEWriteWithoutResponse); // 用于接收数据
+
+// OLED屏幕设置
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// 湿度传感器设置
+const int sensorPin = A0; // 湿度传感器引脚
+const int dryValue = 300;  // 完全干燥的土壤的读数
+const int wetValue = 950;  // 在水中的读数
+int soilMoisture = 0; // 土壤湿度初始值
+
+// 灯光和水泵控制引脚
+const int lightPin = A1;
+const int pumpPin = A2;
+
+// 倒计时相关
+int countdown = 0; // 当前倒计时，单位为分钟
+int a = 0; // 存储接收到的倒计时时长
+
+void setup() {
+  Serial.begin(9600);
+  
+  // 初始化OLED
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.display();
+  delay(2000); // 等待2秒
+  
+  // 初始化蓝牙
+  if (!BLE.begin()) {
+    Serial.println("Starting BLE failed!");
+    while (1);
+  }
+  BLE.setLocalName("Arduino BLE");
+  BLE.setAdvertisedService(myService); 
+  myService.addCharacteristic(outputCharacteristic);
+  myService.addCharacteristic(inputCharacteristic);
+  BLE.addService(myService);
+  inputCharacteristic.setEventHandler(BLEWritten, onBLEWrite);
+  BLE.advertise();
+  
+  // 初始化引脚
+  pinMode(lightPin, OUTPUT);
+  pinMode(pumpPin, OUTPUT);
+  digitalWrite(lightPin, LOW);
+  digitalWrite(pumpPin, LOW);
+  
+  Serial.println("System initialized");
+}
+
+void loop() {
+  BLEDevice central = BLE.central();
+  if (central) {
+    Serial.print("Connected to central: ");
+    Serial.println(central.address());
+    while (central.connected()) {
+      updateSoilMoisture(); // 更新土壤湿度
+      delay(1000); // 根据需要调整延迟
+    }
+    Serial.print("Disconnected from central: ");
+    Serial.println(central.address());
+  }
+  countdown=countdown-1;
+}
+
+void onBLEWrite(BLEDevice central, BLECharacteristic characteristic) {
+  if (characteristic.uuid() == inputCharacteristic.uuid()) {
+    int receivedValue = inputCharacteristic.value();
+    Serial.print("Received Value: ");
+    Serial.println(receivedValue);
+    
+    // 根据接收的值控制灯光或设置倒计时
+    if (receivedValue == 1) {
+      digitalWrite(lightPin, HIGH); // 设置A1为高电位
+    } else if (receivedValue == 2) {
+      digitalWrite(lightPin, LOW); // 设置A1为低电位
+    } else if (receivedValue >= 3 && receivedValue <= 120) {
+      countdown = receivedValue; // 设置倒计时，单位为分钟
+      a = receivedValue; // 更新接收到的倒计时时长
+    }
+    updateDisplay(); // 更新显示
+    
+  }
+}
+
+void updateSoilMoisture() {
+  int sensorValue = analogRead(sensorPin);
+  soilMoisture = map(sensorValue, dryValue, wetValue, 0, 100);
+  soilMoisture = constrain(soilMoisture, 0, 100);
+  
+  int adjustedMoisture = soilMoisture + 20; // 湿度值增加20%
+  adjustedMoisture = constrain(adjustedMoisture, 0, 100); // 确保湿度不超过100%
+  
+  // 根据调整后的湿度控制水泵
+  if (adjustedMoisture < 60) {
+    digitalWrite(pumpPin, LOW);
+  } else if (adjustedMoisture > 60) {
+    digitalWrite(pumpPin, HIGH);
+  }
+  
+  // 发送调整后的湿度值至手机
+  outputCharacteristic.writeValue(adjustedMoisture);
+  
+  updateDisplay(); // 更新OLED显示
+}
+
+void updateDisplay() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  
+  // 显示标题
+  display.setCursor(0, 0);
+  display.println("Bamboost");
+
+  display.setTextSize(1);
+  // 显示湿度
+  display.setCursor(0, 20);
+  display.print("Moisture: ");
+  display.print(soilMoisture + 20); // 显示实际湿度+20
+  display.println("%");
+
+  
+  // 显示倒计时
+  if (countdown > 0) {
+    display.setCursor(0, 30);
+    display.print("Timer: ");
+    display.print(countdown);
+    display.println(" min");
+    digitalWrite(lightPin, HIGH); // 设置A1为高电位
+    // 计算并绘制进度条
+    float progress = (float)(a - (a - countdown)) / (float)a;
+    
+    drawProgressBar(0, 40, 100, 10, progress);
+  }
+  else
+  digitalWrite(lightPin, LOW); // 设置A1为低电位
+  countdown=countdown-1;
+  display.display();
+}
+
+void drawProgressBar(int x, int y, int width, int height, float progress) {
+  display.drawRect(x, y, width, height, SSD1306_WHITE); // 绘制进度条边框
+  int barWidth = (int)((width - 2) * progress); // 计算当前进度宽度
+  display.fillRect(x + 1, y + 1, barWidth, height - 2, SSD1306_WHITE); // 填充进度
+}
